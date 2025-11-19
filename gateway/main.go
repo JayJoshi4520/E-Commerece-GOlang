@@ -21,7 +21,8 @@ func main() {
 	r := chi.NewRouter()
 	r.Mount("/api/auth", http.StripPrefix("/api/auth", proxyTo("http://localhost:8081")))
 	r.Mount("/api/catalog", http.StripPrefix("/api/catalog", proxyTo("http://localhost:8082")))
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	r.Mount("/api/order", http.StripPrefix("/api/order", proxyTo("http://localhost:8083")))
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 
 	log.Println("gateway listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", r))

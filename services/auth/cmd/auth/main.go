@@ -15,6 +15,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -81,6 +82,9 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
+
+	r.Handle("/metrics", promhttp.Handler())
+
 	r.Post("/v1/auth/register", s.register)
 	r.Post("/v1/auth/login", s.login)
 	r.With(s.authn).Get("/v1/auth/me", s.me)
@@ -131,6 +135,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		"exp": time.Now().Add(24 * time.Hour).Unix(),
 	})
 	t, _ := token.SignedString(s.jwt)
+	os.Setenv("JWT_SECRET", t)
 	_ = json.NewEncoder(w).Encode(map[string]string{"token": t})
 }
 

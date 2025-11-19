@@ -7,11 +7,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 )
 
 type Server struct{ db *pgxpool.Pool }
@@ -41,9 +44,10 @@ func getenv(k, d string) string {
 	return d
 }
 
+var rdb = redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+
 func main() {
 	dbURL := getenv("DATABASE_URL", "postgres://app:example@localhost:5432/app?sslmode=disable")
-
 	pool, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
 		log.Fatalf("Error Creating a Pool: %v", err)
@@ -54,6 +58,9 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
+
+	r.Handle("/metrics", promhttp.Handler())
+
 	r.Get("/v1/products/list", s.list)
 	r.Get("/v1/products/{id}", s.get)
 
@@ -62,6 +69,15 @@ func main() {
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+
+	var ctx = r.Context()
+	cached, err := rdb.Get(ctx, "catalog:list").Result()
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(cached))
+		return
+	}
+
 	rows, err := s.db.Query(r.Context(), "SELECT id, title, description, price_cents, stock FROM products ORDER BY created_at DESC")
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -79,7 +95,10 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		productList = append(productList, p)
 	}
 
-	_ = json.NewEncoder(w).Encode(productList)
+	b, _ := json.Marshal(productList)
+	rdb.Set(ctx, "catalog:list", b, 60*time.Second)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {

@@ -14,6 +14,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -26,7 +27,6 @@ type Server struct {
 func loadENV() error {
 	err := godotenv.Load()
 	if err != nil {
-		// Try loading from specific paths if the default fails
 		err = godotenv.Load(".env")
 		if err != nil {
 			return fmt.Errorf("error loading .env file: %v", err)
@@ -49,6 +49,11 @@ type CheckoutItem struct {
 }
 type CheckoutBody struct {
 	Items []CheckoutItem `json:"items"`
+}
+
+type orderStatus struct {
+	OrderID string `json:"order_id"`
+	Status  string `json:"status"`
 }
 
 func main() {
@@ -87,8 +92,10 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 
+	r.Handle("/metrics", promhttp.Handler())
 	r.With(s.authn).Post("/v1/orders/checkout", s.checkout)
 	r.With(s.authn).Get("/v1/orders/{id}", s.getOrder)
+	go s.consumePayments(context.Background())
 
 	log.Println("catalog listening on :8083")
 	log.Fatal(http.ListenAndServe(":8083", r))
@@ -193,6 +200,41 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		"status":      "pending",
 		"total_cents": total,
 	})
+}
+
+func (s *Server) consumePayments(ctx context.Context) {
+	r := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{getenv("KAFKA_BROKER", "localhost:9092")},
+		Topic:   "payment.succeeded",
+		GroupID: "order-service",
+	})
+	defer r.Close()
+
+	log.Println("order: consuming 'payment.succeeded'")
+	for {
+		m, err := r.ReadMessage(ctx)
+		if err != nil {
+			log.Fatalf("Reading Error: %v\n", err)
+			continue
+		}
+		var event orderStatus
+		err = json.Unmarshal(m.Value, &event)
+		if err != nil {
+			log.Fatalf("Bad Event: %v\n", err)
+			continue
+		}
+		if event.Status != "succeeded" {
+			continue
+		}
+
+		_, err = s.db.Exec(ctx,
+			"UPDATE orders SET status='paid' WHERE id=$1",
+			event.OrderID)
+		if err != nil {
+			log.Printf("Order update failed: %v", err)
+		}
+		log.Println("order marked paid:", event.OrderID)
+	}
 }
 
 func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
