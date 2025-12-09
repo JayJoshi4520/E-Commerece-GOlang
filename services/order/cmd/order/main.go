@@ -235,7 +235,6 @@ func (s *Server) consumePayments(ctx context.Context) {
 	}
 }
 
-
 func (s *Server) consumePaymentFailures(ctx context.Context) {
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{getenv("KAFKA_BROKER", "localhost:9092")},
@@ -269,8 +268,6 @@ func (s *Server) consumePaymentFailures(ctx context.Context) {
 		}
 	}
 }
-
-
 
 func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

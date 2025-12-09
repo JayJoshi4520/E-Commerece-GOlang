@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,13 +13,18 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
 
-type Server struct{ db *pgxpool.Pool }
+type Server struct {
+	db     *pgxpool.Pool
+	rdb    *redis.Client
+	jwtKey []byte
+}
 
 type P struct {
 	ID          string `json:"id"`
@@ -44,17 +51,35 @@ func getenv(k, d string) string {
 	return d
 }
 
+func random32() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
 var rdb = redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 
 func main() {
+	loadENV()
+
 	dbURL := getenv("DATABASE_URL", "postgres://app:example@localhost:5432/app?sslmode=disable")
+	jwtSecret := []byte(getenv("JWT_SECRET", random32()))
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: getenv("REDIS_ADDR", "localhost:6379"),
+	})
+
 	pool, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
 		log.Fatalf("Error Creating a Pool: %v", err)
 	}
 	defer pool.Close()
 
-	s := &Server{db: pool}
+	s := &Server{
+		db:     pool,
+		rdb:    rdb,
+		jwtKey: jwtSecret,
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -64,8 +89,47 @@ func main() {
 	r.Get("/v1/products/list", s.list)
 	r.Get("/v1/products/{id}", s.get)
 
+	// seller endpoints
+	r.With(s.authn, s.requireRole("seller")).Post("/v1/products", s.createProduct)
+	r.With(s.authn, s.requireRole("seller")).Put("/v1/products/{id}", s.updateProduct)
+	r.With(s.authn, s.requireRole("seller")).Delete("/v1/products/{id}", s.deleteProduct)
+
 	log.Println("catalog listening on :8082")
 	log.Fatal(http.ListenAndServe(":8082", r))
+}
+
+func (s *Server) authn(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if len(auth) < 8 || auth[:7] != "Bearer " {
+			http.Error(w, "missing token", 401)
+			return
+		}
+		tok, err := jwt.Parse(auth[7:], func(t *jwt.Token) (interface{}, error) { return s.jwtKey, nil })
+		if err != nil || !tok.Valid {
+			log.Printf("Token error: %v", err)
+			http.Error(w, "invalid token", 401)
+			return
+		}
+		claims, _ := tok.Claims.(jwt.MapClaims)
+		role := claims["role"].(string)
+		email, _ := claims["sub"].(string)
+		ctx := context.WithValue(r.Context(), "email", email)
+		ctx = context.WithValue(ctx, "role", role)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (S *Server) requireRole(role string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Context().Value("role") != role {
+				http.Error(w, "forbidden", 402)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
@@ -114,4 +178,62 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+func (s *Server) createProduct(w http.ResponseWriter, r *http.Request) {
+	var p P
+	err := json.NewDecoder(r.Body).Decode(&p)
+	if err != nil {
+		http.Error(w, "invalid json", 400)
+	}
+
+	err = s.db.QueryRow(r.Context(),
+		`INSERT INTO products (title, description, price_cents, stock) VALUES ($1, $2, $3, $4) RETURNING id`,
+		p.Title, p.Description, p.PriceCents, p.Stock).Scan(&p.ID)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+	}
+
+	s.rdb.Del(r.Context(), "catalog:products:list")
+	json.NewEncoder(w).Encode(p)
+}
+
+func (s *Server) updateProduct(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var p P
+	err := json.NewDecoder(r.Body).Decode(&p)
+	if err != nil {
+		http.Error(w, "invalid json", 400)
+		return
+	}
+
+	_, err = s.db.Exec(r.Context(),
+		`UPDATE products SET title=$1, description=$2, price_cents=$3, stock=$4, updated_at=now() WHERE id=$5`,
+		p.Title, p.Description, p.PriceCents, p.Stock, id)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+	}
+
+	s.rdb.Del(r.Context(), "catalog:products:list")
+	s.rdb.Del(r.Context(), "catalog:product:"+id)
+
+	w.WriteHeader(204)
+}
+
+func (s *Server) deleteProduct(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	_, err := s.db.Exec(r.Context(),
+		"DELETE FROM products WHERE id=$1", id)
+
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	s.rdb.Del(r.Context(), "catalog:products:list")
+	s.rdb.Del(r.Context(), "catalog:product:"+id)
+
+	w.WriteHeader(204)
 }
