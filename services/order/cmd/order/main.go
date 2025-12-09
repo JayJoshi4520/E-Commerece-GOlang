@@ -96,6 +96,7 @@ func main() {
 	r.With(s.authn).Post("/v1/orders/checkout", s.checkout)
 	r.With(s.authn).Get("/v1/orders/{id}", s.getOrder)
 	go s.consumePayments(context.Background())
+	go s.consumePaymentFailures(context.Background())
 
 	log.Println("catalog listening on :8083")
 	log.Fatal(http.ListenAndServe(":8083", r))
@@ -104,7 +105,6 @@ func main() {
 func (s *Server) authn(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		fmt.Printf("Auth: %v \n", auth)
 		if len(auth) < 8 || auth[:7] != "Bearer " {
 			http.Error(w, "missing token", 401)
 			return
@@ -117,7 +117,6 @@ func (s *Server) authn(next http.Handler) http.Handler {
 		}
 		claims, _ := tok.Claims.(jwt.MapClaims)
 		email, _ := claims["sub"].(string)
-		fmt.Printf("TOK and Email: %v || %v\n", tok, email)
 		ctx := context.WithValue(r.Context(), "email", email)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -126,7 +125,6 @@ func (s *Server) authn(next http.Handler) http.Handler {
 func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	email := r.Context().Value("email").(string)
 
-	fmt.Print(email)
 	var body CheckoutBody
 	var total int
 
@@ -236,6 +234,43 @@ func (s *Server) consumePayments(ctx context.Context) {
 		log.Println("order marked paid:", event.OrderID)
 	}
 }
+
+
+func (s *Server) consumePaymentFailures(ctx context.Context) {
+	r := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{getenv("KAFKA_BROKER", "localhost:9092")},
+		Topic:   "payment.failed",
+		GroupID: "order-service",
+	})
+	defer r.Close()
+
+	log.Println("order: consuming 'payment.failed'")
+	for {
+		m, err := r.ReadMessage(ctx)
+		if err != nil {
+			log.Fatalf("Reading Error: %v\n", err)
+			continue
+		}
+		var event orderStatus
+		err = json.Unmarshal(m.Value, &event)
+		if err != nil {
+			log.Fatalf("Bad Event: %v\n", err)
+			continue
+		}
+		if event.Status != "failed" {
+			continue
+		}
+
+		_, err = s.db.Exec(ctx,
+			"UPDATE orders SET status='failed' WHERE id=$1",
+			event.OrderID)
+		if err != nil {
+			log.Printf("Order failed update: %v", err)
+		}
+	}
+}
+
+
 
 func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

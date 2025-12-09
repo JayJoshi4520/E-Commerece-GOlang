@@ -91,6 +91,9 @@ func main() {
 	if err := createTopic(broker, "payment.succeeded"); err != nil {
 		log.Fatalf("Failed to initialize producer topic 'payment.succeeded': %v", err)
 	}
+	if err := createTopic(broker, "payment.failed"); err != nil {
+		log.Fatalf("Failed to initialize producer topic 'payment.succeeded': %v", err)
+	}
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{broker},
@@ -107,6 +110,15 @@ func main() {
 	}
 
 	defer writer.Close()
+
+
+	writerfailed := &kafka.Writer{
+		Addr:     kafka.TCP(broker),
+		Topic:    "payment.succeeded",
+		Balancer: &kafka.LeastBytes{},
+	}
+
+	defer writerfailed.Close()
 
 	log.Println("Payment service is listening to 'order.created'")
 
@@ -132,7 +144,11 @@ func main() {
 		})
 		err = writer.WriteMessages(context.Background(), kafka.Message{Value: payload})
 		if err != nil {
-			log.Printf("Write Payment event failed: %v", err)
+			payload, _ := json.Marshal(map[string]any{
+        "order_id": event.OrderID, "status": "failed", "provider":"stripe", "failed_at": time.Now().UTC(),
+      	})
+			 _ = writerfailed.WriteMessages(context.Background(), kafka.Message{Value: payload})
+			continue
 		}
 	}
 }
