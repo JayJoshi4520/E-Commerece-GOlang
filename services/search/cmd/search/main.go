@@ -54,7 +54,7 @@ func main() {
 
 	es, err := elasticsearch.NewClient(elasticsearch.Config{
 		Addresses: []string{
-			"https://localhost:9200",
+			"http://localhost:9200",
 		},
 	})
 
@@ -121,13 +121,13 @@ func (s *Server) searchProducts(w http.ResponseWriter, r *http.Request) {
 		"query": map[string]any{
 			"bool": map[string]any{
 				"must": must,
-				"filter": []map[string]any{
-					{
-						"term": map[string]any{
-							"is_active": true,
-						},
-					},
-				},
+				// "filter": []map[string]any{
+				// 	{
+				// 		"term": map[string]any{
+				// 			"is_active": true,
+				// 		},
+				// 	},
+				// },
 			},
 		},
 	}
@@ -140,6 +140,7 @@ func (s *Server) searchProducts(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		http.Error(w, err.Error(), 500)
+		return
 	}
 
 	defer res.Body.Close()
@@ -147,12 +148,23 @@ func (s *Server) searchProducts(w http.ResponseWriter, r *http.Request) {
 	var esResp map[string]any
 	json.NewDecoder(res.Body).Decode(&esResp)
 
-	hits := esResp["hits"].(map[string]any)["hits"].([]map[string]any)
+	hits := esResp["hits"].(map[string]any)["hits"].([]interface{})
 
 	var outs []map[string]any
 	for _, h := range hits {
-		src := h["source"].(map[string]any)["_source"]
-		outs = append(outs, src.(map[string]any))
+		hitMap, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		// FIX 4: Access "_source" directly
+		if src, ok := hitMap["_source"].(map[string]any); ok {
+			// Optional: Inject ID if needed
+			if id, ok := hitMap["_id"].(string); ok {
+				src["id"] = id
+			}
+			outs = append(outs, src)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

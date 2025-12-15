@@ -56,6 +56,41 @@ type orderStatus struct {
 	Status  string `json:"status"`
 }
 
+func createTopic(topic string) {
+	broker := getenv("KAFKA_BROKER", "localhost:9092")
+	conn, err := kafka.Dial("tcp", broker)
+	if err != nil {
+		log.Printf("Failed to dial kafka: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	controller, err := conn.Controller()
+	if err != nil {
+		log.Printf("Failed to get controller: %v", err)
+		return
+	}
+
+	var controllerConn *kafka.Conn
+	controllerConn, err = kafka.Dial("tcp", fmt.Sprintf("%s:%d", controller.Host, controller.Port))
+	if err != nil {
+		log.Printf("Failed to dial controller: %v", err)
+		return
+	}
+	defer controllerConn.Close()
+
+	topicConfigs := []kafka.TopicConfig{
+		{Topic: topic, NumPartitions: 1, ReplicationFactor: 1},
+	}
+
+	err = controllerConn.CreateTopics(topicConfigs...)
+	if err != nil {
+		log.Printf("Topic creation warning (might already exist): %v", err)
+	} else {
+		log.Printf("Topic '%s' created successfully", topic)
+	}
+}
+
 func main() {
 	if err := loadENV(); err != nil {
 		log.Printf("Warning: %v", err)
@@ -72,6 +107,9 @@ func main() {
 		log.Fatalf("Unable to connect to database: %v", err)
 	}
 	defer pool.Close()
+	createTopic("order.created")
+	createTopic("payment.succeeded")
+	createTopic("payment.failed")
 
 	writer := &kafka.Writer{
 		Addr:         kafka.TCP(os.Getenv("KAFKA_BROKER")),

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -200,6 +201,7 @@ func (s *Server) createProduct(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 	}
 
+	s.indexProductInES(p)
 	s.rdb.Del(r.Context(), "catalog:products:list")
 	json.NewEncoder(w).Encode(p)
 }
@@ -238,6 +240,7 @@ func (s *Server) deleteProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.deleteProductInES(id)
 	s.rdb.Del(r.Context(), "catalog:products:list")
 	s.rdb.Del(r.Context(), "catalog:product:"+id)
 
@@ -317,4 +320,33 @@ func (s *Server) uploadProductImage(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"image_url": imageURL,
 	})
+}
+
+func (s *Server) indexProductInES(p P) {
+	esURL := getenv("ES_URL", "http://localhost:9200")
+	reqBody, _ := json.Marshal(p)
+
+	req, _ := http.NewRequest("PUT",
+		fmt.Sprintf("%s/products/_doc/%s", esURL, p.ID),
+		strings.NewReader(string(reqBody)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println("ES index Error: ", err)
+		return
+	}
+	defer resp.Body.Close()
+}
+
+func (s *Server) deleteProductInES(id string) {
+	esURL := getenv("ES_URL", "http://localhost:9200")
+	req, _ := http.NewRequest("DELETE",
+		fmt.Sprintf("%s/products/_doc/%s", esURL, id), nil)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println("ES delete error: ", err)
+		return
+	}
+	defer resp.Body.Close()
 }
