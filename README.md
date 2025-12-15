@@ -1,3 +1,16 @@
+# Create .env inside a root directory
+```
+DATABASE_URL=postgres://app:example@localhost:5432/app?sslmode=disable
+REDIS_ADDR=localhost:6379
+ACCESS_TTL=15m
+REFRESH_TTL=720h
+COOKIE_DOMAIN=localhost
+COOKIE_SECURE=false
+KAFKA_BROKER=localhost:29092
+JWT_SECRET=CHANGE_ME
+ES_URL=http://localhost:9200
+```
+
 # Database Initialization
 
 ## 1. Create Tables in Database using **001_init.sql** file
