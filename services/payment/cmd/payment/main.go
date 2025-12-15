@@ -105,16 +105,15 @@ func main() {
 
 	writer := &kafka.Writer{
 		Addr:     kafka.TCP(broker),
-		Topic:    "payment.succeeded",
+		Topic:    "payment.failed",
 		Balancer: &kafka.LeastBytes{},
 	}
 
 	defer writer.Close()
 
-
 	writerfailed := &kafka.Writer{
 		Addr:     kafka.TCP(broker),
-		Topic:    "payment.succeeded",
+		Topic:    "payment.failed",
 		Balancer: &kafka.LeastBytes{},
 	}
 
@@ -135,19 +134,19 @@ func main() {
 		}
 
 		log.Println("processing payment for order:", event.OrderID, "total:", event.TotalCents)
-		time.Sleep(800 * time.Millisecond)
+		time.Sleep(8000 * time.Millisecond)
 		payload, _ := json.Marshal(map[string]any{
 			"order_id": event.OrderID,
-			"status":   "succeeded",
+			"status":   "failed",
 			"provider": "mock",
 			"paid_at":  time.Now().UTC(),
 		})
 		err = writer.WriteMessages(context.Background(), kafka.Message{Value: payload})
 		if err != nil {
 			payload, _ := json.Marshal(map[string]any{
-        "order_id": event.OrderID, "status": "failed", "provider":"stripe", "failed_at": time.Now().UTC(),
-      	})
-			 _ = writerfailed.WriteMessages(context.Background(), kafka.Message{Value: payload})
+				"order_id": event.OrderID, "status": "failed", "provider": "stripe", "failed_at": time.Now().UTC(),
+			})
+			_ = writerfailed.WriteMessages(context.Background(), kafka.Message{Value: payload})
 			continue
 		}
 	}

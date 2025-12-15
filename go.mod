@@ -3,6 +3,7 @@ module github.com/JayJoshi4520/ecommerce
 go 1.25.0
 
 require (
+	github.com/elastic/go-elasticsearch v0.0.0
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/jackc/pgx/v5 v5.7.6

@@ -6,9 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,9 +24,10 @@ import (
 )
 
 type Server struct {
-	db     *pgxpool.Pool
-	rdb    *redis.Client
-	jwtKey []byte
+	db        *pgxpool.Pool
+	rdb       *redis.Client
+	jwtKey    []byte
+	assetsDir string
 }
 
 type P struct {
@@ -64,6 +68,7 @@ func main() {
 
 	dbURL := getenv("DATABASE_URL", "postgres://app:example@localhost:5432/app?sslmode=disable")
 	jwtSecret := []byte(getenv("JWT_SECRET", random32()))
+	assetsDir := getenv("ASSETS_DIR", "./assets")
 
 	rdb := redis.NewClient(&redis.Options{
 		Addr: getenv("REDIS_ADDR", "localhost:6379"),
@@ -76,9 +81,10 @@ func main() {
 	defer pool.Close()
 
 	s := &Server{
-		db:     pool,
-		rdb:    rdb,
-		jwtKey: jwtSecret,
+		db:        pool,
+		rdb:       rdb,
+		jwtKey:    jwtSecret,
+		assetsDir: assetsDir,
 	}
 
 	r := chi.NewRouter()
@@ -93,6 +99,7 @@ func main() {
 	r.With(s.authn, s.requireRole("seller")).Post("/v1/products", s.createProduct)
 	r.With(s.authn, s.requireRole("seller")).Put("/v1/products/{id}", s.updateProduct)
 	r.With(s.authn, s.requireRole("seller")).Delete("/v1/products/{id}", s.deleteProduct)
+	r.With(s.authn, s.requireRole("seller")).Post("/v1/products/{id}/image", s.uploadProductImage)
 
 	log.Println("catalog listening on :8082")
 	log.Fatal(http.ListenAndServe(":8082", r))
@@ -107,7 +114,6 @@ func (s *Server) authn(next http.Handler) http.Handler {
 		}
 		tok, err := jwt.Parse(auth[7:], func(t *jwt.Token) (interface{}, error) { return s.jwtKey, nil })
 		if err != nil || !tok.Valid {
-			log.Printf("Token error: %v", err)
 			http.Error(w, "invalid token", 401)
 			return
 		}
@@ -236,4 +242,79 @@ func (s *Server) deleteProduct(w http.ResponseWriter, r *http.Request) {
 	s.rdb.Del(r.Context(), "catalog:product:"+id)
 
 	w.WriteHeader(204)
+}
+
+func (s *Server) uploadProductImage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+	err := r.ParseMultipartForm(10 << 20)
+	if err != nil {
+		http.Error(w, "file too large or invalid form", http.StatusBadRequest)
+		return
+	}
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing image field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	buf := make([]byte, 512)
+	n, _ := file.Read(buf)
+	fileType := http.DetectContentType(buf[:n])
+
+	_, err = file.Seek(0, 0)
+	if err != nil {
+		http.Error(w, "file not found", 500)
+		return
+	}
+	if fileType != "image/jpeg" && fileType != "image/png" && fileType != "image/webp" {
+		http.Error(w, "invalid image type", http.StatusBadRequest)
+		return
+	}
+	extension := filepath.Ext(header.Filename)
+	if extension == "" {
+		exts, _ := mime.ExtensionsByType(fileType)
+		if len(exts) > 0 {
+			extension = exts[0]
+		} else {
+			extension = ".jpg"
+		}
+	}
+
+	filename := fmt.Sprintf("%s_%d%s", id, time.Now().Unix(), extension)
+	relPath := filepath.Join("products", filename)
+	absPath := filepath.Join(s.assetsDir, relPath)
+	err = os.MkdirAll(filepath.Dir(absPath), 0o755)
+	if err != nil {
+		http.Error(w, "unable to create dir", http.StatusInternalServerError)
+		return
+	}
+
+	dst, err := os.Create(absPath)
+	if err != nil {
+		http.Error(w, "unable to create file", http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, file)
+	if err != nil {
+		http.Error(w, "unable to copy file", http.StatusInternalServerError)
+		return
+	}
+	imageURL := "/static/" + filepath.ToSlash(relPath)
+	_, err = s.db.Exec(r.Context(),
+		"UPDATE products SET image_url=$1, updated_at=now() WHERE id=$2",
+		imageURL, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.rdb.Del(r.Context(), "catalog:products:list")
+	s.rdb.Del(r.Context(), "catalog:product:"+id)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"image_url": imageURL,
+	})
 }

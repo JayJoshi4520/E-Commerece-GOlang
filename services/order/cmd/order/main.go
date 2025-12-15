@@ -142,11 +142,29 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 
 	for _, it := range body.Items {
 		var price int
+		if it.Qty <= 0 {
+			http.Error(w, "invalid quantity", http.StatusBadRequest)
+			return
+		}
 		err := transection.QueryRow(
 			r.Context(),
 			"SELECT price_cents FROM products WHERE id=$1", it.ProductID).Scan(&price)
 		if err != nil {
 			http.Error(w, "product not found", 404)
+			return
+		}
+
+		cmdTag, err := transection.Exec(r.Context(),
+			"UPDATE products SET stock = stock - $1, updated_at=now() WHERE id=$2 AND stock >= $1",
+			it.Qty, it.ProductID)
+
+		if err != nil {
+			http.Error(w, "internal error", 500)
+			return
+		}
+
+		if cmdTag.RowsAffected() == 0 {
+			http.Error(w, "out of stock "+it.ProductID, 400)
 			return
 		}
 		total += price * it.Qty
@@ -244,6 +262,7 @@ func (s *Server) consumePaymentFailures(ctx context.Context) {
 	defer r.Close()
 
 	log.Println("order: consuming 'payment.failed'")
+
 	for {
 		m, err := r.ReadMessage(ctx)
 		if err != nil {
@@ -259,12 +278,55 @@ func (s *Server) consumePaymentFailures(ctx context.Context) {
 		if event.Status != "failed" {
 			continue
 		}
-
-		_, err = s.db.Exec(ctx,
-			"UPDATE orders SET status='failed' WHERE id=$1",
+		transection, err := s.db.Begin(ctx)
+		if err != nil {
+			log.Println("begin tx (failed):", err)
+			continue
+		}
+		rows, err := transection.Query(ctx,
+			"SELECT product_id, qty FROM order_items WHERE order_id=$1",
 			event.OrderID)
 		if err != nil {
 			log.Printf("Order failed update: %v", err)
+		}
+
+		var items []CheckoutItem
+		for rows.Next() {
+			var it CheckoutItem
+			err = rows.Scan(&it.ProductID, &it.Qty)
+			if err != nil {
+				log.Println("scan order_items:", err)
+				transection.Rollback(ctx)
+				rows.Close()
+				continue
+			}
+			items = append(items, it)
+		}
+		rows.Close()
+		for _, it := range items {
+			_, err := transection.Exec(ctx,
+				`UPDATE products SET stock = stock + $1, updated_at=now() WHERE id=$2`,
+				it.Qty, it.ProductID)
+			if err != nil {
+				log.Println("stock error:", err)
+				transection.Rollback(ctx)
+				continue
+			}
+		}
+
+		_, err = transection.Exec(ctx,
+			`UPDATE orders SET status='failed', updated_at=now() WHERE id=$1 AND status <> 'failed'`,
+			event.OrderID)
+		if err != nil {
+			log.Println("mark fail error:", err)
+			transection.Rollback(ctx)
+			continue
+		}
+		err = transection.Commit(ctx)
+		if err != nil {
+			log.Println("commit error:", err)
+		} else {
+			log.Println("order makred failed & stock restored: ", event.OrderID)
 		}
 	}
 }

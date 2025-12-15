@@ -1,0 +1,13 @@
+{
+  "mappings": {
+    "properties": {
+      "title": { "type": "text" },
+      "description": { "type": "text" },
+      "category": { "type": "keyword" },
+      "price_cents": { "type": "integer" },
+      "stock": { "type": "integer" },
+      "image_url": { "type": "keyword" },
+      "is_active": { "type": "boolean" }
+    }
+  }
+}
